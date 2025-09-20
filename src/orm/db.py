@@ -32,40 +32,47 @@ class FieldType(Enum):
   JSON = "JSON"
   UUID = "UUID"
 
-class ConnectionPool:
-  _pool: asyncpg.Pool | None = None
+class Database:
   def __init__(self):
-    if self._pool:
-      return
-    dsn = os.getenv("DATABASE_URL")
-    if not dsn:
+    self._pool: asyncpg.Pool | None = None
+    self._dsn = os.getenv("DATABASE_URL")
+    if not self._dsn:
       raise ValueError("DATABASE_URL environment variable is not set")
 
-    self._pool = asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10, connection_class=NoUnlistenConnection)
-
-  def get_pool(self) -> asyncpg.Pool:
+  async def initialize_pool(self):
+    """异步初始化连接池"""
     if not self._pool:
-      self.__init__()
-      if not self._pool:
-        raise ValueError("Connection pool failed to initialize")
+      self._pool = await asyncpg.create_pool(
+        dsn=self._dsn,
+        min_size=1,
+        max_size=10,
+        connection_class=NoUnlistenConnection
+      )
+    return self._pool
+
+  async def get_pool(self) -> asyncpg.Pool:
+    if not self._pool:
+      await self.initialize_pool()
+    if not self._pool:
+      raise ValueError("Connection pool failed to initialize")
     return self._pool
   async def close_pool(self):
     if self._pool:
       await self._pool.close()
 
   async def _execute(self, query: str, *args):
-    pool = self.get_pool()
+    pool = await self.get_pool()
     async with pool.acquire() as con:
       return await con.execute(query, *args)
 
   # @todo ?
   async def _fetch(self, query: str, *args):
-    pool = self.get_pool()
+    pool = await self.get_pool()
     async with pool.acquire() as con:
       return await con.fetch(query, *args)
 
   async def _fetchrow(self, query: str, *args):
-    pool = self.get_pool()
+    pool = await self.get_pool()
     async with pool.acquire() as con:
       return await con.fetchrow(query, *args)
 
@@ -73,9 +80,12 @@ class ConnectionPool:
     cols = []
     for col_name, col_desc in columns.items():
       if isinstance(col_desc, FieldType):
+        cols.append(f"{col_name} {col_desc.value}")
+      elif isinstance(col_desc, str):
+        # 支持直接传入字符串类型
         cols.append(f"{col_name} {col_desc}")
       else:
-        raise ValueError(f"Unsupported column type: {col_desc}")
+        raise ValueError(f"Unsupported column type: {col_desc}. Expected FieldType or str.")
     cols_sql = ", ".join(cols)
     query = f"CREATE TABLE IF NOT EXISTS {table_name} ({cols_sql});"
     await self._execute(query)
@@ -83,6 +93,11 @@ class ConnectionPool:
   async def drop_table(self, table_name: str):
     query = f"DROP TABLE IF EXISTS {table_name};"
     await self._execute(query)
+
+  async def count_table(self)->int:
+    query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';"
+    row = await self._fetchrow(query)
+    return row['count'] if row else 0
 
   async def create_index(self, table_name: str, index_name: str, column_name: str):
     query = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column_name});"
