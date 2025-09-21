@@ -4,7 +4,7 @@ class NoUnlistenConnection(asyncpg.Connection):
   """
   自定义 asyncpg 连接：覆盖 reset 以跳过 UNLISTEN。
 
-  背景：部分 PostgreSQL 兼容实现（例如某些 openGauss 版本）尚不支持 LISTEN/UNLISTEN，
+  背景：部分 PostgreSQL 兼容实现（例如 openGauss 版本）尚不支持 LISTEN/UNLISTEN，
   而 asyncpg 在连接释放/重置时会执行 UNLISTEN * 清理监听，导致报错：
       "UNLISTEN statement is not yet supported"。
 
@@ -50,7 +50,7 @@ class Database:
       )
     return self._pool
 
-  async def get_pool(self) -> asyncpg.Pool:
+  async def _get_pool(self) -> asyncpg.Pool:
     if not self._pool:
       await self.initialize_pool()
     if not self._pool:
@@ -61,18 +61,18 @@ class Database:
       await self._pool.close()
 
   async def _execute(self, query: str, *args):
-    pool = await self.get_pool()
+    pool = await self._get_pool()
     async with pool.acquire() as con:
       return await con.execute(query, *args)
 
   # @todo ?
   async def _fetch(self, query: str, *args):
-    pool = await self.get_pool()
+    pool = await self._get_pool()
     async with pool.acquire() as con:
       return await con.fetch(query, *args)
 
   async def _fetchrow(self, query: str, *args):
-    pool = await self.get_pool()
+    pool = await self._get_pool()
     async with pool.acquire() as con:
       return await con.fetchrow(query, *args)
 
@@ -87,11 +87,11 @@ class Database:
       else:
         raise ValueError(f"Unsupported column type: {col_desc}. Expected FieldType or str.")
     cols_sql = ", ".join(cols)
-    query = f"CREATE TABLE IF NOT EXISTS {table_name} ({cols_sql});"
+    query = f'CREATE TABLE IF NOT EXISTS "{table_name}" ({cols_sql});'
     await self._execute(query)
 
   async def drop_table(self, table_name: str):
-    query = f"DROP TABLE IF EXISTS {table_name};"
+    query = f'DROP TABLE IF EXISTS "{table_name}";'
     await self._execute(query)
 
   async def count_table(self)->int:
@@ -128,3 +128,7 @@ class Database:
     conds = " AND ".join(f"{k} = ${i+1}" for i, k in enumerate(conditions.keys()))
     query = f"DELETE FROM {table_name} WHERE {conds} RETURNING *;"
     return await self._fetchrow(query, *conditions.values())
+
+
+db = Database()
+_ = db.initialize_pool()
