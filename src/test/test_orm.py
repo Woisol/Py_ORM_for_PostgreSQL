@@ -1,3 +1,6 @@
+"""
+vibe generate
+"""
 import pytest
 import pytest_asyncio
 import os

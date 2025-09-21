@@ -6,15 +6,38 @@ from typing import Any, Dict, Type, get_type_hints
 from src.orm.db import Database, db, FieldType
 
 
+class ForeignKey:
+    """外键关联描述符"""
+    def __init__(self, reference_model: str, reference_field: str = "id",
+                 on_delete: str = "CASCADE", on_update: str = "CASCADE"):
+        self.reference_model = reference_model
+        self.reference_field = reference_field
+        self.on_delete = on_delete
+        self.on_update = on_update
+        self.name = None
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        return instance.__dict__.get(self.name)
+
+    def __set__(self, instance, value):
+        instance.__dict__[self.name] = value
+
+
 class Field:
     """字段描述符"""
     def __init__(self, field_type: FieldType, nullable: bool = True, default: Any = None,
-                 primary_key: bool = False, unique: bool = False):
+                 primary_key: bool = False, unique: bool = False, foreign_key: 'ForeignKey | None' = None):
         self.field_type = field_type
         self.nullable = nullable
         self.default = default
         self.primary_key = primary_key
         self.unique = unique
+        self.foreign_key = foreign_key
         self.name = None  # 将在元类中设置
 
     def __set_name__(self, owner, name):
@@ -48,8 +71,9 @@ class ModelMeta(type):
         if '_table_name' not in namespace:
             namespace['_table_name'] = cls._camel_to_snake(name)
 
-        # 自动收集字段
+        # 自动收集字段和外键
         fields = {}
+        foreign_keys = {}
         primary_key = None
 
         # 从Field对象收集字段信息
@@ -70,6 +94,16 @@ class ModelMeta(type):
                     else:
                         field_def += f" DEFAULT {attr_value.default}"
 
+                # 处理外键约束
+                if attr_value.foreign_key:
+                    fk = attr_value.foreign_key
+                    foreign_keys[attr_name] = {
+                        'reference_table': cls._camel_to_snake(fk.reference_model),
+                        'reference_field': fk.reference_field,
+                        'on_delete': fk.on_delete,
+                        'on_update': fk.on_update
+                    }
+
                 fields[attr_name] = field_def
 
         # 从类型注解推断剩余字段（没有Field定义的）
@@ -81,6 +115,7 @@ class ModelMeta(type):
                     fields[attr_name] = field_type.value
 
         namespace['_fields'] = fields
+        namespace['_foreign_keys'] = foreign_keys
         namespace['_primary_key'] = primary_key
 
         return super().__new__(cls, name, bases, namespace)
@@ -113,13 +148,14 @@ class BaseModel(metaclass=ModelMeta):
     # 类属性声明（用于类型检查）
     _table_name: str
     _fields: Dict[str, str]
+    _foreign_keys: Dict[str, Dict]
     _primary_key: str | None
 
     def __init__(self, **kwargs):
         # 设置默认属性
         self._indexes = []
         self._unique_constraints = []
-        self._foreign_keys = []
+        self._instance_foreign_keys = []  # 实例级别的外键列表
         self._created_at_field = None
         self._updated_at_field = None
         self._deleted_at_field = None
@@ -136,7 +172,7 @@ class BaseModel(metaclass=ModelMeta):
         db_instance = database_instance or db
         if db_instance is None:
             raise ValueError("Database instance is not initialized.")
-        await db_instance.create_table(cls._table_name, cls._fields)
+        await db_instance.create_table(cls._table_name, cls._fields, cls._foreign_keys)
 
     @classmethod
     def get_table_name(cls) -> str:
@@ -152,6 +188,11 @@ class BaseModel(metaclass=ModelMeta):
     def get_primary_key(cls) -> str | None:
         """获取主键字段名"""
         return cls._primary_key
+
+    @classmethod
+    def get_foreign_keys(cls) -> Dict[str, Dict]:
+        """获取外键定义"""
+        return cls._foreign_keys
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -258,3 +299,43 @@ class BaseModel(metaclass=ModelMeta):
         query = f'DELETE FROM "{self._table_name}" WHERE "{self._primary_key}" = $1'
 
         return await db_instance._execute(query, primary_key_value)
+
+    async def get_related(self, field_name: str, database_instance=None):
+        """获取外键关联的对象"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        if field_name not in self._foreign_keys:
+            raise ValueError(f"Field {field_name} is not a foreign key")
+
+        foreign_key_value = getattr(self, field_name)
+        if foreign_key_value is None:
+            return None
+
+        fk_info = self._foreign_keys[field_name]
+        reference_table = fk_info['reference_table']
+        reference_field = fk_info['reference_field']
+
+        query = f'SELECT * FROM "{reference_table}" WHERE "{reference_field}" = $1'
+        row = await db_instance._fetchrow(query, foreign_key_value)
+
+        if row:
+            # 这里简化处理，返回字典，实际应该返回对应的模型实例
+            return dict(row)
+        return None
+
+    @classmethod
+    async def find_by_foreign_key(cls, field_name: str, foreign_key_value, database_instance=None):
+        """根据外键值查找所有相关记录"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        if field_name not in cls._foreign_keys:
+            raise ValueError(f"Field {field_name} is not a foreign key in {cls.__name__}")
+
+        query = f'SELECT * FROM "{cls._table_name}" WHERE "{field_name}" = $1'
+        rows = await db_instance._fetch(query, foreign_key_value)
+
+        return [cls.from_dict(dict(row)) for row in rows]

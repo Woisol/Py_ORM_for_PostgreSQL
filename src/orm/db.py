@@ -76,16 +76,26 @@ class Database:
     async with pool.acquire() as con:
       return await con.fetchrow(query, *args)
 
-  async def create_table(self, table_name: str, columns: dict):
+  async def create_table(self, table_name: str, columns: dict, foreign_keys: dict | None = None):
     cols = []
     for col_name, col_desc in columns.items():
       if isinstance(col_desc, FieldType):
-        cols.append(f"{col_name} {col_desc.value}")
+        cols.append(f'"{col_name}" {col_desc.value}')
       elif isinstance(col_desc, str):
         # 支持直接传入字符串类型
-        cols.append(f"{col_name} {col_desc}")
+        cols.append(f'"{col_name}" {col_desc}')
       else:
         raise ValueError(f"Unsupported column type: {col_desc}. Expected FieldType or str.")
+
+    # 添加外键约束
+    if foreign_keys:
+      for col_name, fk_info in foreign_keys.items():
+        constraint_name = f"fk_{table_name}_{col_name}"
+        fk_constraint = (f"CONSTRAINT \"{constraint_name}\" FOREIGN KEY (\"{col_name}\") "
+                        f"REFERENCES \"{fk_info['reference_table']}\"(\"{fk_info['reference_field']}\") "
+                        f"ON DELETE {fk_info['on_delete']} ON UPDATE {fk_info['on_update']}")
+        cols.append(fk_constraint)
+
     cols_sql = ", ".join(cols)
     query = f'CREATE TABLE IF NOT EXISTS "{table_name}" ({cols_sql});'
     await self._execute(query)
