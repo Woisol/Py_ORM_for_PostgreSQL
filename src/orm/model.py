@@ -72,15 +72,13 @@ class ModelMeta(type):
 
                 fields[attr_name] = field_def
 
-        # 如果没有显式字段，尝试从类型注解推断
-        if not fields:
-            # 获取类型注解
-            annotations = namespace.get('__annotations__', {})
-            for attr_name, attr_type in annotations.items():
-                if not attr_name.startswith('_'):  # 跳过私有属性
-                    field_type = cls._infer_field_type(attr_type)
-                    if field_type:
-                        fields[attr_name] = field_type.value
+        # 从类型注解推断剩余字段（没有Field定义的）
+        annotations = namespace.get('__annotations__', {})
+        for attr_name, attr_type in annotations.items():
+            if not attr_name.startswith('_') and attr_name not in fields:  # 跳过私有属性和已定义字段
+                field_type = cls._infer_field_type(attr_type)
+                if field_type:
+                    fields[attr_name] = field_type.value
 
         namespace['_fields'] = fields
         namespace['_primary_key'] = primary_key
@@ -128,7 +126,7 @@ class BaseModel(metaclass=ModelMeta):
 
         # 设置字段值
         for key, value in kwargs.items():
-            if hasattr(self, key):
+            if key in self._fields:  # 检查是否是定义的字段
                 setattr(self, key, value)
 
     @classmethod
@@ -172,3 +170,91 @@ class BaseModel(metaclass=ModelMeta):
         class_name = self.__class__.__name__
         attrs = ', '.join(f'{k}={v!r}' for k, v in self.to_dict().items())
         return f'{class_name}({attrs})'
+
+    async def save(self, database_instance=None):
+        """保存当前实例到数据库"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        data = self.to_dict()
+        placeholders = ', '.join(f'${i+1}' for i in range(len(data)))
+        columns = ', '.join(f'"{col}"' for col in data.keys())  # 为列名添加引号
+        values = list(data.values())
+        query = f'INSERT INTO "{self._table_name}" ({columns}) VALUES ({placeholders})'
+
+        return await db_instance._execute(query, *values)
+
+    @classmethod
+    async def find_by_id(cls, id_value, database_instance=None):
+        """根据主键查找记录"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        if not cls._primary_key:
+            raise ValueError(f"Model {cls.__name__} has no primary key defined")
+
+        query = f'SELECT * FROM "{cls._table_name}" WHERE "{cls._primary_key}" = $1'
+        row = await db_instance._fetchrow(query, id_value)
+
+        if row:
+            return cls.from_dict(dict(row))
+        return None
+
+    @classmethod
+    async def find_all(cls, database_instance=None, limit=None, offset=None):
+        """查找所有记录"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        query = f'SELECT * FROM "{cls._table_name}"'
+        if limit:
+            query += f' LIMIT {limit}'
+        if offset:
+            query += f' OFFSET {offset}'
+
+        rows = await db_instance._fetch(query)
+        return [cls.from_dict(dict(row)) for row in rows]
+
+    async def update(self, database_instance=None, **kwargs):
+        """更新当前实例"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        if not self._primary_key:
+            raise ValueError(f"Model {self.__class__.__name__} has no primary key defined")
+
+        # 更新实例属性
+        for key, value in kwargs.items():
+            if key in self._fields:
+                setattr(self, key, value)
+
+        # 构建UPDATE查询
+        data = self.to_dict()
+        primary_key_value = data.pop(self._primary_key)
+
+        if not data:  # 如果没有要更新的字段
+            return
+
+        set_clauses = ', '.join(f'"{col}" = ${i+1}' for i, col in enumerate(data.keys()))
+        values = list(data.values()) + [primary_key_value]
+        query = f'UPDATE "{self._table_name}" SET {set_clauses} WHERE "{self._primary_key}" = ${len(data)+1}'
+
+        return await db_instance._execute(query, *values)
+
+    async def delete(self, database_instance=None):
+        """删除当前实例"""
+        db_instance = database_instance or db
+        if db_instance is None:
+            raise ValueError("Database instance is not initialized.")
+
+        if not self._primary_key:
+            raise ValueError(f"Model {self.__class__.__name__} has no primary key defined")
+
+        primary_key_value = getattr(self, self._primary_key)
+        query = f'DELETE FROM "{self._table_name}" WHERE "{self._primary_key}" = $1'
+
+        return await db_instance._execute(query, primary_key_value)
